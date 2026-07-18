@@ -1,0 +1,4 @@
+wifi_credentials_OLD.txt
+esp32_backup/
+*.bin
+desktop.ini
