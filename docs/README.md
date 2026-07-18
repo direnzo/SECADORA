@@ -221,19 +221,36 @@ Gravar: `pio run --target upload` (porta configurada para COM6 no
 
 ### Status
 
-Firmware **compila com sucesso** (991KB de 1.25MB da partição OTA, cabe
-tranquilo) mas **ainda não foi gravado no hardware** — ficou pendente revisão
-do código pelo usuário antes de gravar. Antes de deixar rodando sem
-supervisão, acompanhar os primeiros minutos (o controle do aquecedor é
-reconstruído, não o original).
+Firmware **gravado e rodando no hardware** (COM6). Revisão de código feita
+antes de gravar: encontrado e corrigido um bug em `handleManual()` que usava
+o número do pino GPIO em vez do canal LEDC para desligar as ventoinhas (fix
+em `main.cpp`), e as credenciais de WiFi foram movidas para
+`secadora_esp32/src/config_secrets.h` (fora do git, ver `.gitignore`).
+
+Credenciais reais de WiFi ficam em `config_secrets.h`, que **não é
+versionado**. Para recriar esse arquivo:
+
+```cpp
+#pragma once
+#define WIFI_SSID     "DIRENZO-2G"   // atencao: case-sensitive, com sufixo "-2G"
+#define WIFI_PASSWORD "..."
+```
+
+⚠️ O SSID configurado inicialmente (`direnzo`, minusculo) nao existia na rede
+— o nome real e `DIRENZO-2G` (maiusculo, com sufixo). Isso causava
+`WL_NO_SSID_AVAIL` mesmo com a senha certa. Descoberto rodando
+`WiFi.scanNetworks()` no boot.
+
+Testado apos gravar: WiFi conecta, `/data` `/set` `/manual` e o dashboard
+respondem corretamente, sensores SHT31 lendo nos dois pontos.
 
 ## Próximos passos
 
-1. Revisar `secadora_esp32/src/main.cpp` e `config.h` (em especial a função
-   `controlar()` e os parâmetros de `HEATER_*`/`FAN_*_DUTY_AUTO`).
-2. Gravar no ESP32 (`pio run --target upload`, COM6) e acompanhar o
-   comportamento nos primeiros minutos.
-3. Ajustar os parâmetros de controle conforme o resultado observado.
+1. ~~Revisar `secadora_esp32/src/main.cpp` e `config.h`~~ — feito.
+2. ~~Gravar no ESP32 e acompanhar o comportamento~~ — feito, ver Status acima.
+3. Ajustar os parâmetros de controle (`HEATER_*`/`FAN_*_DUTY_AUTO` em
+   `config.h`) conforme o resultado observado ao longo de um ciclo de secagem
+   completo.
 4. Confirmar se o mapeamento FAN=GPIO27(topo)/EXT=GPIO33(copa) está certo, ou
    inverter em `config.h`.
 5. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
