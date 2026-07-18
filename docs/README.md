@@ -129,12 +129,115 @@ linker). O que este backup garante:
   equivalente do zero**, ajustando o que for necessário (nova rede WiFi,
   melhorias, etc.).
 
-## Próximos passos sugeridos
+## Parte 2 — Firmware reescrito (`secadora_esp32/`)
 
-1. Decidir se quer que eu **escreva um novo `.ino`** reproduzindo esse
-   comportamento (dashboard, PID/histerese do aquecedor, endpoints, logging
-   no Google Sheets) como ponto de partida do novo repositório.
-2. Definir as novas credenciais WiFi (SSID/senha) a embutir ou configurar via
-   portal cativo (ex: `WiFiManager`) para evitar hardcode.
-3. Criar `.gitignore` cobrindo `wifi_credentials_OLD.txt`, `esp32_backup/`
-   (binários grandes) e qualquer futuro arquivo de segredos.
+Depois da coleta, foi escrito um firmware novo em `secadora_esp32/` (projeto
+PlatformIO), com o objetivo de manter o comportamento o mais fiel possível ao
+original, trocando apenas a rede WiFi.
+
+### O que é fiel ao original (byte-a-byte ou confirmado)
+
+- **Dashboard HTML/CSS/JS** (`src/dashboard_html.h`): extraído byte-a-byte
+  direto do binário do firmware original (região entre `<!DOCTYPE html>` e
+  `</html>` no `app0_ota_0.bin`), não reescrito à mão — visual e
+  comportamento do JS idênticos ao original.
+- **Rotas HTTP e contrato JSON**: `/`, `/data`, `/set?alvo=`,
+  `/manual?toggle=1`, com os mesmos nomes de campo (`t1`, `h1`, `f_duty`,
+  `e_on`, `m_man`, etc.).
+- **Webhook do Google Sheets**: mesma URL e mesmos parâmetros de query
+  (`timestamp`, `t_topo`, `h_topo`, `t_copa`, `h_copa`, `t_media`, `h_media`,
+  `ua`, `delta`, `heater`, `duty`, `fan`, `exaust`, `t_alvo`), recuperados
+  também byte-a-byte do binário.
+- **Sensores**: SHT31 em `0x44` (COPA) e `0x45` (TOPO), I2C em GPIO21
+  (SDA) / GPIO22 (SCL) — confirmado tanto pelo log de boot original quanto
+  pelas strings do firmware.
+- **NTP**: `pool.ntp.org`.
+- **Faixa do alvo**: 30–75 °C, passo 1 ou 5 °C (do JS original).
+
+### Pinagem de saída (aquecedor/ventoinhas)
+
+Esses valores **não estavam em nenhum texto recuperável** do binário (são
+constantes numéricas compiladas, não strings) — foram informados pelo
+usuário a partir da documentação/fiação real do hardware:
+
+| Pino | Função |
+|---|---|
+| GPIO27 | MOSFET → 2x cooler DeepCool **TOPO** (mapeado para o badge "FAN" do dashboard) |
+| GPIO33 | MOSFET → 2x cooler DeepCool **COPA** (mapeado para o badge "EXT" do dashboard) |
+| GPIO32 | SSR 40A → 2x aquecedor 400W / 110V (controle por time-proportioning) |
+
+⚠️ O mapeamento FAN=topo / EXT=copa foi uma escolha razoável (a fiação real
+é por localização — topo/copa — enquanto o dashboard rotula por função —
+fan/exaustor). Confirme na prática e inverta em `config.h` se necessário.
+
+Uma tentativa inicial de identificar os pinos por teste físico (gravando um
+sketch que pulsava candidatos um a um) foi abandonada por ser lenta demais de
+acompanhar — o usuário tinha a documentação da fiação e passou os pinos
+diretamente. O firmware de teste ficou em `pin_test/` (pode ser apagado).
+
+### TFT display — não incluído
+
+O hardware original foi planejado com um display TFT colorido (pinos
+3V3/GPIO2/GPIO4/GPIO5/GPIO18/GND/GPIO23), mas **o firmware que estava
+rodando na placa não continha nenhum código de driver de display** (nenhuma
+string de biblioteca tipo TFT_eSPI/ILI9341/ST7735/Adafruit_GFX foi encontrada
+na varredura). Ou seja, o TFT nunca chegou a ser implementado em software —
+por isso o firmware reescrito também não o inclui, para ficar fiel ao que
+realmente estava rodando.
+
+### O que foi RECONSTRUÍDO (não é o algoritmo original)
+
+A lógica exata de controle (histerese, curva de duty, tempos de exaustão)
+**não é recuperável** de um binário compilado — não sobra nenhum texto
+indicando os valores. Foi implementado um controle proporcional simples como
+ponto de partida, em `src/main.cpp` (função `controlar()`) e
+`src/config.h`:
+
+- Erro = alvo − temperatura média; duty do aquecedor proporcional ao erro
+  (mapeado de 0 a 10 °C de erro → 0 a 255 de duty), com histerese de
+  `HEATER_DEADBAND_C`.
+- Aquecedor (SSR) controlado por **time-proportioning**: dentro de uma
+  janela de `HEATER_WINDOW_MS`, fica ligado por `duty/255` da janela.
+- Ventoinhas ligam junto com o aquecedor, em duty fixo
+  (`FAN_TOPO_DUTY_AUTO`, `FAN_COPA_DUTY_AUTO`).
+
+**Ajustar esses parâmetros em `config.h` depois de observar o comportamento
+real** — não há garantia de que batem com o comportamento original.
+
+### Estrutura
+
+```
+secadora_esp32/
+├── platformio.ini      ambiente esp32dev, lib Adafruit SHT31
+└── src/
+    ├── main.cpp          logica principal (wifi, sensores, controle, http, sheets)
+    ├── config.h          credenciais wifi, pinos, urls, parametros de controle
+    └── dashboard_html.h  dashboard recuperado byte-a-byte (nao mexer sem necessidade)
+```
+
+Compilar: `pio run` dentro de `secadora_esp32/`.
+Gravar: `pio run --target upload` (porta configurada para COM6 no
+`platformio.ini`).
+
+### Status
+
+Firmware **compila com sucesso** (991KB de 1.25MB da partição OTA, cabe
+tranquilo) mas **ainda não foi gravado no hardware** — ficou pendente revisão
+do código pelo usuário antes de gravar. Antes de deixar rodando sem
+supervisão, acompanhar os primeiros minutos (o controle do aquecedor é
+reconstruído, não o original).
+
+## Próximos passos
+
+1. Revisar `secadora_esp32/src/main.cpp` e `config.h` (em especial a função
+   `controlar()` e os parâmetros de `HEATER_*`/`FAN_*_DUTY_AUTO`).
+2. Gravar no ESP32 (`pio run --target upload`, COM6) e acompanhar o
+   comportamento nos primeiros minutos.
+3. Ajustar os parâmetros de controle conforme o resultado observado.
+4. Confirmar se o mapeamento FAN=GPIO27(topo)/EXT=GPIO33(copa) está certo, ou
+   inverter em `config.h`.
+5. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
+   completo (`esp32_backup/flash_backup_4MB.bin`) permite restaurar a
+   qualquer momento com `esptool write-flash 0x0 flash_backup_4MB.bin`
+   (a rede WiFi antiga salva nele não vai mais conectar, mas o resto volta
+   como estava).
