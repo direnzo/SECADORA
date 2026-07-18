@@ -1,8 +1,11 @@
 #pragma once
 
 // ===== WiFi =====
-#define WIFI_SSID     "direnzo"
-#define WIFI_PASSWORD "pixorr@2574"
+// Credenciais reais ficam em config_secrets.h (fora do git, ver .gitignore).
+// Crie o arquivo com:
+//   #define WIFI_SSID     "sua_rede"
+//   #define WIFI_PASSWORD "sua_senha"
+#include "config_secrets.h"
 
 // ===== Pinos (confirmados na fiacao real, nao recuperados do firmware) =====
 #define PIN_SDA        21   // SHT31 (I2C)

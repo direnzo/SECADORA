@@ -175,8 +175,8 @@ void handleManual() {
       // entra em modo manual com tudo desligado por seguranca
       duty = 0; fDuty = 0; eDuty = 0;
       heaterOn = fanOn = exaustOn = false;
-      ledcWrite(PIN_FAN_TOPO, 0);
-      ledcWrite(PIN_FAN_COPA, 0);
+      ledcWrite(LEDC_CH_FAN_TOPO, 0);
+      ledcWrite(LEDC_CH_FAN_COPA, 0);
     }
   }
   server.send(200, "application/json", montarJson());
