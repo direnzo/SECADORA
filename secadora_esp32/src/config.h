@@ -47,6 +47,13 @@
 #define CONTROL_LOOP_MS      1000    // periodo do laco de controle
 #define HEATER_WINDOW_MS      4000   // janela de controle proporcional do SSR (time-proportioning)
 #define HEATER_DEADBAND_C     0.5f   // histerese em torno do alvo
+// Termo integral: so-proporcional estabilizava com erro residual permanente
+// (~3.5C abaixo do alvo, observado na pratica - o duty gerado pelo erro
+// nesse ponto so bastava pra compensar a perda de calor, sem sobrar pra
+// continuar subindo). O integral acumula o erro ao longo do tempo e forca o
+// duty a subir enquanto o erro persistir, fechando esse gap.
+#define HEATER_KI              0.03f  // ganho integral (duty por grau-segundo acumulado)
+#define HEATER_INTEGRAL_MAX  150.0f   // anti-windup: contribuicao maxima do termo integral no duty
 #define FAN_DUTY_AUTO          180   // duty (0-255) do cooler de circulacao (COPA) quando aquecendo
 #define EXT_DUTY_AUTO          140   // duty (0-255) do cooler de exaustao (TOPO) em modo automatico
 #define SENSOR_READ_INTERVAL_MS 2000

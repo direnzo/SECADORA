@@ -88,21 +88,32 @@ void lerSensores() {
 
 // ---------------------------------------------------------------------
 // Controle (RECONSTRUIDO - nao e o algoritmo original, ver comentario acima)
-// Aquecedor: proporcional simples sobre o erro (alvo - tMed), com
-// time-proportioning no SSR (janela HEATER_WINDOW_MS).
+// Aquecedor: PI sobre o erro (alvo - tMed) - proporcional + integral (este
+// ultimo pra fechar o erro residual observado na pratica com so-proporcional,
+// ver comentario de HEATER_KI em config.h), com time-proportioning no SSR
+// (janela HEATER_WINDOW_MS).
 // Fans: ligam junto com o aquecedor para circular/exaurir o ar.
 // ---------------------------------------------------------------------
 void controlar() {
   if (modoManual) return; // em modo manual, duty/estado sao definidos via /manual e nao mexidos aqui
 
+  static float integralErro = 0;
   float tMed = (t1 + t2) / 2.0f;
   float erro = alvo - tMed;
 
   if (erro <= HEATER_DEADBAND_C) {
     duty = 0;
+    integralErro = 0; // reset ao atingir o alvo - evita windup enquanto ocioso
   } else {
-    // proporcional simples: erro de 0 a 10C mapeado para duty 0-255
-    float d = (erro / 10.0f) * 255.0f;
+    // proporcional: erro de 0 a 10C mapeado para duty 0-255
+    float dP = (erro / 10.0f) * 255.0f;
+
+    integralErro += erro * (CONTROL_LOOP_MS / 1000.0f);
+    float integralMax = HEATER_INTEGRAL_MAX / HEATER_KI;
+    if (integralErro > integralMax) integralErro = integralMax;
+    float dI = integralErro * HEATER_KI;
+
+    float d = dP + dI;
     if (d > 255) d = 255;
     if (d < 0) d = 0;
     duty = (uint8_t)d;
