@@ -35,8 +35,8 @@ Adafruit_SHT31 sht31Topo = Adafruit_SHT31();
 Adafruit_SHT31 sht31Copa = Adafruit_SHT31();
 Adafruit_ST7735 tft = Adafruit_ST7735(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 
-#define LEDC_CH_FAN_TOPO 0
-#define LEDC_CH_FAN_COPA 1
+#define LEDC_CH_FAN 0
+#define LEDC_CH_EXT 1
 
 // ----- Estado global (espelha os campos do JSON /data do dashboard) -----
 float t1 = NAN, h1 = NAN;   // TOPO
@@ -109,13 +109,13 @@ void controlar() {
   }
   heaterOn = duty > 0;
 
-  fDuty = heaterOn ? FAN_TOPO_DUTY_AUTO : 0;
-  eDuty = heaterOn ? FAN_COPA_DUTY_AUTO : 0;
+  fDuty = heaterOn ? FAN_DUTY_AUTO : 0;
+  eDuty = heaterOn ? EXT_DUTY_AUTO : 0;
   fanOn = fDuty > 0;
   exaustOn = eDuty > 0;
 
-  ledcWrite(LEDC_CH_FAN_TOPO, fDuty);
-  ledcWrite(LEDC_CH_FAN_COPA, eDuty);
+  ledcWrite(LEDC_CH_FAN, fDuty);
+  ledcWrite(LEDC_CH_EXT, eDuty);
 }
 
 // SSR via time-proportioning (chamado com frequencia alta no loop())
@@ -180,8 +180,8 @@ void handleManual() {
       // entra em modo manual com tudo desligado por seguranca
       duty = 0; fDuty = 0; eDuty = 0;
       heaterOn = fanOn = exaustOn = false;
-      ledcWrite(LEDC_CH_FAN_TOPO, 0);
-      ledcWrite(LEDC_CH_FAN_COPA, 0);
+      ledcWrite(LEDC_CH_FAN, 0);
+      ledcWrite(LEDC_CH_EXT, 0);
     }
   }
   server.send(200, "application/json", montarJson());
@@ -359,12 +359,12 @@ void setup() {
   // Saidas
   pinMode(PIN_HEATER_SSR, OUTPUT);
   digitalWrite(PIN_HEATER_SSR, LOW);
-  ledcSetup(LEDC_CH_FAN_TOPO, 25000, 8);
-  ledcSetup(LEDC_CH_FAN_COPA, 25000, 8);
-  ledcAttachPin(PIN_FAN_TOPO, LEDC_CH_FAN_TOPO);
-  ledcAttachPin(PIN_FAN_COPA, LEDC_CH_FAN_COPA);
-  ledcWrite(LEDC_CH_FAN_TOPO, 0);
-  ledcWrite(LEDC_CH_FAN_COPA, 0);
+  ledcSetup(LEDC_CH_FAN, 25000, 8);
+  ledcSetup(LEDC_CH_EXT, 25000, 8);
+  ledcAttachPin(PIN_FAN, LEDC_CH_FAN);
+  ledcAttachPin(PIN_EXT, LEDC_CH_EXT);
+  ledcWrite(LEDC_CH_FAN, 0);
+  ledcWrite(LEDC_CH_EXT, 0);
 
   // I2C / sensores
   Wire.begin(PIN_SDA, PIN_SCL);

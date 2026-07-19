@@ -10,8 +10,11 @@
 // ===== Pinos (confirmados na fiacao real, nao recuperados do firmware) =====
 #define PIN_SDA        21   // SHT31 (I2C)
 #define PIN_SCL        22   // SHT31 (I2C)
-#define PIN_FAN_TOPO   27   // MOSFET -> 2x cooler DeepCool topo (badge "FAN" no dashboard)
-#define PIN_FAN_COPA   33   // MOSFET -> 2x cooler DeepCool copa (badge "EXT" no dashboard)
+// Nomeados por FUNCAO (o dashboard rotula por funcao, nao por posicao fisica):
+// confirmado com o usuario que o par de coolers do TOPO exausta (joga ar pra
+// fora) e o par da COPA circula (faz o ar interno da camara circular).
+#define PIN_FAN 33   // MOSFET -> 2x cooler DeepCool COPA (circulacao, badge "FAN")
+#define PIN_EXT 27   // MOSFET -> 2x cooler DeepCool TOPO (exaustao, badge "EXT")
 #define PIN_HEATER_SSR 32   // SSR 40A -> 2x aquecedor 400W (110V)
 
 // ===== TFT display 1.8" SPI 128x160 V1.1 (chip ST7735), confirmado na fiacao
@@ -44,6 +47,6 @@
 #define CONTROL_LOOP_MS      1000    // periodo do laco de controle
 #define HEATER_WINDOW_MS      4000   // janela de controle proporcional do SSR (time-proportioning)
 #define HEATER_DEADBAND_C     0.5f   // histerese em torno do alvo
-#define FAN_TOPO_DUTY_AUTO     180   // duty (0-255) da ventoinha topo quando aquecendo (circulacao)
-#define FAN_COPA_DUTY_AUTO     140   // duty (0-255) da ventoinha copa (exaustao) em modo automatico
+#define FAN_DUTY_AUTO          180   // duty (0-255) do cooler de circulacao (COPA) quando aquecendo
+#define EXT_DUTY_AUTO          140   // duty (0-255) do cooler de exaustao (TOPO) em modo automatico
 #define SENSOR_READ_INTERVAL_MS 2000
