@@ -278,12 +278,41 @@ respondem corretamente, sensores SHT31 lendo nos dois pontos.
 
 1. ~~Revisar `secadora_esp32/src/main.cpp` e `config.h`~~ — feito.
 2. ~~Gravar no ESP32 e acompanhar o comportamento~~ — feito, ver Status acima.
-3. Ajustar os parâmetros de controle (`HEATER_*`/`FAN_*_DUTY_AUTO` em
-   `config.h`) conforme o resultado observado ao longo de um ciclo de secagem
-   completo.
-4. Confirmar se o mapeamento FAN=GPIO27(topo)/EXT=GPIO33(copa) está certo, ou
-   inverter em `config.h`.
-5. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
+3. ~~Confirmar mapeamento FAN/EXT~~ — feito. Usuário confirmou fisicamente que
+   TOPO exausta e COPA circula (invertido do que se assumia) — corrigido em
+   `config.h`/`main.cpp` (`PIN_FAN`/`PIN_EXT`, ver seção TFT/pinagem acima).
+4. ~~Ajustar controle do aquecedor~~ — parcialmente feito. So-proporcional
+   estabilizava com erro residual permanente (~3.5C abaixo do alvo, visto em
+   ~6min de teste real). Adicionado termo integral (PI) em `controlar()`.
+   **Ainda não validado até o fim** — ver pendência urgente abaixo.
+
+## 🔴 Pendência urgente (próxima sessão): aquecedor parece não estar aquecendo
+
+Durante o teste do PI (~9min com o sistema fechado, ninguém mexendo), o duty
+ficou travado em 255 (100%) o tempo todo e a temperatura **caiu** de ~44°C
+para ~22°C (ambiente) em vez de subir ou estabilizar. Ou seja, o software
+mandou aquecer no máximo e na prática não houve aquecimento nenhum. Sistema
+deixado em **modo manual (tudo desligado)** por segurança ao final da sessão.
+
+Checar fisicamente antes de religar (circuito de 110V/40A — cuidado):
+
+1. Disjuntor/fusível do circuito do aquecedor (pode ter desarmado)
+2. LED indicador do SSR (deveria acender com o comando em 100%)
+3. Conexão/continuidade do elemento resistivo de 400W
+4. Alimentação de 110V chegando no SSR
+
+Isso não é bug de firmware — o software está calculando e mandando o duty
+certo (`aplicarHeaterSSR()` não foi alterado nessa sessão). É elétrico/físico.
+
+Depois de resolver:
+
+1. Validar se o PI fecha o gap até o alvo sem overshoot significativo, e
+   reajustar `HEATER_KI`/`HEATER_INTEGRAL_MAX` se necessário.
+2. Resolver a solda fria do display (GND/RESET) — combinado para depois,
+   ainda pendente.
+3. Configurar IP fixo (ou mDNS tipo `secadora.local`) para o dashboard —
+   combinado para depois de terminar os ajustes de controle.
+4. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
    completo (`esp32_backup/flash_backup_4MB.bin`) permite restaurar a
    qualquer momento com `esptool write-flash 0x0 flash_backup_4MB.bin`
    (a rede WiFi antiga salva nele não vai mais conectar, mas o resto volta
