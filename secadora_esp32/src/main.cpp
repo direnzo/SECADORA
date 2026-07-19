@@ -4,6 +4,9 @@
 #include <HTTPClient.h>
 #include <Wire.h>
 #include <Adafruit_SHT31.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 #include <time.h>
 
 #include "config.h"
@@ -30,6 +33,7 @@
 WebServer server(80);
 Adafruit_SHT31 sht31Topo = Adafruit_SHT31();
 Adafruit_SHT31 sht31Copa = Adafruit_SHT31();
+Adafruit_ST7735 tft = Adafruit_ST7735(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 
 #define LEDC_CH_FAN_TOPO 0
 #define LEDC_CH_FAN_COPA 1
@@ -51,6 +55,7 @@ unsigned long bootMillis = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastControlLoop = 0;
 unsigned long lastSheetsSend = 0;
+unsigned long lastDisplayUpdate = 0;
 bool sheetsTaskRunning = false;
 
 // ---------------------------------------------------------------------
@@ -241,6 +246,107 @@ void enviarParaSheets() {
 }
 
 // ---------------------------------------------------------------------
+// Display TFT ST7735 128x160 - reescrito do zero (nao recuperado do
+// firmware original, ver docs/README.md). Redesenha a tela inteira a
+// cada DISPLAY_UPDATE_MS para evitar sobra de digitos de valores antigos.
+// ---------------------------------------------------------------------
+#define COR_FUNDO_PAINEL 0x2104   // cinza-azulado escuro (header/rodape)
+#define COR_APAGADO      0x39E7   // cinza escuro (indicador "desligado")
+#define COR_LABEL        0x7BEF   // cinza claro (rotulos pequenos)
+
+// Bolinha de status (ligado=verde, desligado=cinza) + rotulo ao lado.
+void desenharStatusDot(int x, int y, bool ligado, const char *label) {
+  tft.fillCircle(x, y, 4, ligado ? ST77XX_GREEN : COR_APAGADO);
+  tft.setTextColor(ligado ? ST77XX_WHITE : COR_LABEL);
+  tft.setTextSize(1);
+  tft.setCursor(x + 8, y - 4);
+  tft.print(label);
+}
+
+void atualizarDisplay() {
+  // Reinicializa o controlador periodicamente - autorrecuperacao caso o TFT
+  // trave/apague por ruido eletrico ou glitch de sinal SPI (sintoma observado
+  // na fiacao real: tela mostra dados e depois fica em branco).
+  static uint8_t ciclosDesdeReinit = 0;
+  if (ciclosDesdeReinit++ >= 5) {
+    ciclosDesdeReinit = 0;
+    tft.initR(INITR_BLACKTAB);
+    tft.setSPISpeed(4000000);
+    tft.setRotation(0);
+  }
+
+  float dT = t1 - t2;
+  unsigned long up = (millis() - bootMillis) / 1000UL;
+  bool wifiOk = WiFi.status() == WL_CONNECTED;
+
+  tft.fillScreen(ST77XX_BLACK);
+
+  // ----- Cabecalho (titulo muda de cor em modo manual) -----
+  tft.fillRect(0, 0, 128, 14, COR_FUNDO_PAINEL);
+  tft.setTextSize(1);
+  tft.setTextColor(modoManual ? ST77XX_YELLOW : ST77XX_WHITE);
+  tft.setCursor(4, 4);
+  tft.print(modoManual ? "MANUAL" : "SECADORA");
+  tft.fillCircle(120, 7, 3, wifiOk ? ST77XX_GREEN : ST77XX_RED);
+
+  // ----- TOPO (numero grande) -----
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(4, 18);
+  tft.print("TOPO");
+  tft.setTextSize(3);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(4, 28);
+  tft.printf("%2.0f", t1);
+  tft.setTextSize(2);
+  tft.print("C");
+  tft.setTextSize(1);
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(90, 40);
+  tft.printf("%2.0f%%", h1);
+
+  // ----- COPA (numero grande) -----
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(4, 60);
+  tft.print("COPA");
+  tft.setTextSize(3);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(4, 70);
+  tft.printf("%2.0f", t2);
+  tft.setTextSize(2);
+  tft.print("C");
+  tft.setTextSize(1);
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(90, 82);
+  tft.printf("%2.0f%%", h2);
+
+  tft.drawFastHLine(4, 104, 120, COR_FUNDO_PAINEL);
+
+  // ----- Alvo / delta -----
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(4, 110);
+  tft.printf("ALVO %dC", alvo);
+  tft.setTextSize(1);
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(4, 128);
+  tft.printf("dT %4.1fC", dT);
+
+  // ----- Barra de potencia do aquecedor -----
+  int larguraBarra = 120;
+  int fillBarra = (int)((long)duty * larguraBarra / 255);
+  tft.drawRect(4, 138, larguraBarra, 8, COR_LABEL);
+  tft.fillRect(5, 139, larguraBarra - 2, 6, COR_APAGADO);
+  if (fillBarra > 2) {
+    tft.fillRect(5, 139, fillBarra - 2, 6, heaterOn ? ST77XX_RED : ST77XX_GREEN);
+  }
+
+  // ----- Status (aquecedor / fan / exaustor / modo) -----
+  desenharStatusDot(6, 152, heaterOn, "AQ");
+  desenharStatusDot(46, 152, fanOn, "FAN");
+  desenharStatusDot(90, 152, exaustOn, "EXA");
+}
+
+// ---------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------
 void setup() {
@@ -266,6 +372,15 @@ void setup() {
   bool okCopa = sht31Copa.begin(SHT31_ADDR_COPA);
   Serial.printf("[SHT31] TOPO (0x%02X): %s\n", SHT31_ADDR_TOPO, okTopo ? "OK" : "FALHA");
   Serial.printf("[SHT31] COPA (0x%02X): %s\n", SHT31_ADDR_COPA, okCopa ? "OK" : "FALHA");
+
+  // Display TFT
+  tft.initR(INITR_BLACKTAB);
+  tft.setSPISpeed(4000000);   // clock SPI baixo (default e bem mais alto) -
+                               // reduz erro de sinal em fiacao breadboard/jumper
+  tft.setRotation(0);   // retrato (tela montada em pe) - trocar p/ 2 se a imagem
+                        // ficar de cabeca para baixo
+  tft.fillScreen(ST77XX_BLACK);
+  Serial.println("[TFT] Inicializado");
 
   // WiFi
   Serial.println("Conectando WiFi");
@@ -318,5 +433,10 @@ void loop() {
   if (agora - lastSheetsSend >= SHEETS_SEND_INTERVAL_MS) {
     lastSheetsSend = agora;
     enviarParaSheets();
+  }
+
+  if (agora - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
+    lastDisplayUpdate = agora;
+    atualizarDisplay();
   }
 }

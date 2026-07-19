@@ -175,15 +175,45 @@ sketch que pulsava candidatos um a um) foi abandonada por ser lenta demais de
 acompanhar — o usuário tinha a documentação da fiação e passou os pinos
 diretamente. O firmware de teste ficou em `pin_test/` (pode ser apagado).
 
-### TFT display — não incluído
+### TFT display
 
-O hardware original foi planejado com um display TFT colorido (pinos
-3V3/GPIO2/GPIO4/GPIO5/GPIO18/GND/GPIO23), mas **o firmware que estava
-rodando na placa não continha nenhum código de driver de display** (nenhuma
-string de biblioteca tipo TFT_eSPI/ILI9341/ST7735/Adafruit_GFX foi encontrada
-na varredura). Ou seja, o TFT nunca chegou a ser implementado em software —
-por isso o firmware reescrito também não o inclui, para ficar fiel ao que
-realmente estava rodando.
+O binário original não tinha nenhuma string de biblioteca de display
+(TFT_eSPI/ILI9341/ST7735/Adafruit_GFX) na varredura — mas o usuário confirmou
+que o display **funcionava fisicamente** no hardware antigo, fiado direto no
+ESP32 (3V3/GPIO2/GPIO4/GPIO5/GPIO18/GND/GPIO23). Conclusão: o código original
+provavelmente desenhava na tela via um driver enxuto/manual sem strings de
+debug (por isso invisível numa varredura de texto), então **não dava pra
+recuperar o código exato** — foi reescrito do zero.
+
+Modelo real do display, confirmado pelo usuário: **"1.8 TFT SPI 128x160
+V1.1"**, chip **ST7735**, sem touchscreen (só 5 sinais wireados: CS/DC/RESET/
+SCK/MOSI — touch precisaria de mais pinos tipo T_CLK/T_CS/T_DIN/T_DO/T_IRQ).
+
+Pinagem confirmada pelo usuário:
+
+| Sinal | Pino ESP32 |
+|---|---|
+| CS | GPIO5 |
+| DC (A0) | GPIO2 |
+| RESET | GPIO4 |
+| SCK | GPIO18 (VSPI hardware) |
+| MOSI (SDA) | GPIO23 (VSPI hardware) |
+| VCC / LED (backlight) | 3.3V direto |
+
+Implementado em `src/main.cpp` (`atualizarDisplay()`) com a lib `Adafruit
+ST7735 and ST7789 Library`. Layout em retrato (tela montada em pé,
+`setRotation(0)`): números grandes de TOPO/COPA em destaque, alvo, barra de
+potência do aquecedor, e indicadores de status (aquecedor/fan/exaustor) com
+bolinha colorida. Atualiza a cada `DISPLAY_UPDATE_MS` (1s), redesenhando a
+tela inteira.
+
+⚠️ **Problema conhecido**: o display mostra os dados e depois apaga/pisca —
+sintoma que muda conforme o aparelho é movido fisicamente, apontando para
+solda fria/mau contato (provavelmente no GND ou no RESET), não bug de
+software. Mitigação em código: reinicialização automática do controlador a
+cada poucos ciclos (`ciclosDesdeReinit` em `atualizarDisplay()`) para
+recuperar sozinho quando trava. Correção definitiva pendente: inspecionar/
+resoldar as juntas do display, começando por GND e RESET.
 
 ### O que foi RECONSTRUÍDO (não é o algoritmo original)
 
