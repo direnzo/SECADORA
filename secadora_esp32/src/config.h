@@ -7,6 +7,9 @@
 //   #define WIFI_PASSWORD "sua_senha"
 #include "config_secrets.h"
 
+// Nome mDNS - acessivel como http://<nome>.local, IP continua dinamico (DHCP)
+#define MDNS_HOSTNAME "secadora"
+
 // ===== Pinos (confirmados na fiacao real, nao recuperados do firmware) =====
 #define PIN_SDA        21   // SHT31 (I2C)
 #define PIN_SCL        22   // SHT31 (I2C)
@@ -53,7 +56,14 @@
 // continuar subindo). O integral acumula o erro ao longo do tempo e forca o
 // duty a subir enquanto o erro persistir, fechando esse gap.
 #define HEATER_KI              0.03f  // ganho integral (duty por grau-segundo acumulado)
-#define HEATER_INTEGRAL_MAX  150.0f   // anti-windup: contribuicao maxima do termo integral no duty
+// Teto do anti-windup ajustado pra ficar proximo do que o .ino original
+// (recuperado depois, ver docs/README.md) usava validado na pratica:
+// KI=0.30 x integral max 200 = contribuicao maxima de 60 no duty.
+#define HEATER_INTEGRAL_MAX   60.0f   // anti-windup: contribuicao maxima do termo integral no duty
 #define FAN_DUTY_AUTO          180   // duty (0-255) do cooler de circulacao (COPA) quando aquecendo
 #define EXT_DUTY_AUTO          140   // duty (0-255) do cooler de exaustao (TOPO) em modo automatico
 #define SENSOR_READ_INTERVAL_MS 2000
+// Suavizacao exponencial (media movel) dos sensores antes de usar no
+// controle - reduz o chacoalho de duty visto na pratica com leitura crua.
+// Fator baixo = suavizacao mais forte (mais lento pra reagir).
+#define SENSOR_SMOOTH_FACTOR   0.15f

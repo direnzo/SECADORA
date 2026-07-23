@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <Adafruit_SHT31.h>
 #include <SPI.h>
@@ -57,6 +59,12 @@ unsigned long lastControlLoop = 0;
 unsigned long lastSheetsSend = 0;
 unsigned long lastDisplayUpdate = 0;
 bool sheetsTaskRunning = false;
+bool wifiConectado = false;  // rastreia queda de WiFi pra reconectar sozinho
+
+// Media suavizada (exponencial) dos sensores - usada no controle (PI) em vez
+// da leitura crua, pra reduzir chacoalho de duty por ruido de sensor. Valores
+// individuais (t1/h1/t2/h2) continuam crus, exibidos como estao.
+float filtTemp = NAN, filtHum = NAN, filtUA = 0;
 
 // ---------------------------------------------------------------------
 // Umidade absoluta (g/m3) - formula padrao (Magnus)
@@ -65,6 +73,12 @@ float calcAbsHumidity(float tempC, float rh) {
   if (isnan(tempC) || isnan(rh)) return 0;
   float es = 6.112f * expf((17.62f * tempC) / (243.12f + tempC));
   return 216.7f * ((rh / 100.0f) * es) / (273.15f + tempC);
+}
+
+// Media movel exponencial - suaviza ruido de leitura entre ciclos.
+float smooth(float prev, float next) {
+  if (isnan(prev)) return next; // primeira leitura, sem historico ainda
+  return prev + (next - prev) * SENSOR_SMOOTH_FACTOR;
 }
 
 // ---------------------------------------------------------------------
@@ -84,6 +98,12 @@ void lerSensores() {
   float ua1 = calcAbsHumidity(t1, h1);
   float ua2 = calcAbsHumidity(t2, h2);
   uaVal = (ua1 + ua2) / 2.0f;
+
+  // Medias suavizadas - usadas no controle (PI) e na secao "media" do
+  // display, pra reduzir chacoalho de duty por ruido de leitura.
+  filtTemp = smooth(filtTemp, (t1 + t2) / 2.0f);
+  filtHum  = smooth(filtHum,  (h1 + h2) / 2.0f);
+  filtUA   = smooth(filtUA,   uaVal);
 }
 
 // ---------------------------------------------------------------------
@@ -98,7 +118,7 @@ void controlar() {
   if (modoManual) return; // em modo manual, duty/estado sao definidos via /manual e nao mexidos aqui
 
   static float integralErro = 0;
-  float tMed = (t1 + t2) / 2.0f;
+  float tMed = filtTemp; // media suavizada, nao a crua - reduz ruido no duty
   float erro = alvo - tMed;
 
   if (erro <= HEATER_DEADBAND_C) {
@@ -140,8 +160,8 @@ void aplicarHeaterSSR() {
 // JSON de /data - contrato identico ao original (nomes de campo)
 // ---------------------------------------------------------------------
 String montarJson() {
-  float tMed = (t1 + t2) / 2.0f;
-  float hMed = (h1 + h2) / 2.0f;
+  float tMed = filtTemp; // suavizada - log menos ruidoso
+  float hMed = filtHum;
   float dT = t1 - t2;
   unsigned long up = (millis() - bootMillis) / 1000UL;
 
@@ -230,18 +250,36 @@ void sheetsTask(void *param) {
     "&fan=" + String(fDuty) +
     "&exaust=" + String(eDuty) +
     "&t_alvo=" + String(alvo);
+  url.replace(" ", "%20"); // timestamp tem espaco (ex "22/07/2026 23:10:00"),
+                           // sem isso o Apps Script recebe URL malformada (HTTP 400)
 
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Connection", "close");
-  Serial.println("[Sheets] Enviando...");
-  int httpCode = http.GET();
-  if (httpCode > 0) {
-    Serial.printf("[Sheets] OK - HTTP %d\n", httpCode);
-  } else {
-    Serial.printf("[Sheets] Falhou - %s\n", http.errorToString(httpCode).c_str());
+  // WiFiClientSecure + retry: HTTP -1 e um erro comum e intermitente em
+  // requisicoes HTTPS no ESP32 core v3 (visto na pratica). Recria o client
+  // a cada tentativa pra evitar estado corrompido de uma tentativa anterior.
+  int httpCode = -1;
+  for (int tentativa = 1; tentativa <= 3 && httpCode < 0; tentativa++) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(20);
+
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("Connection", "close");
+    http.setTimeout(20000);
+
+    Serial.printf("[Sheets] Enviando (tentativa %d)...\n", tentativa);
+    httpCode = http.GET();
+    if (httpCode == 200 || httpCode == 302) {
+      Serial.printf("[Sheets] OK - HTTP %d\n", httpCode);
+    } else if (httpCode > 0) {
+      Serial.printf("[Sheets] Resposta inesperada - HTTP %d\n", httpCode);
+    } else {
+      Serial.printf("[Sheets] Falhou - %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+
+    if (httpCode < 0 && tentativa < 3) delay(2000);
   }
-  http.end();
 
   sheetsTaskRunning = false;
   vTaskDelete(nullptr);
@@ -257,104 +295,150 @@ void enviarParaSheets() {
 }
 
 // ---------------------------------------------------------------------
-// Display TFT ST7735 128x160 - reescrito do zero (nao recuperado do
-// firmware original, ver docs/README.md). Redesenha a tela inteira a
-// cada DISPLAY_UPDATE_MS para evitar sobra de digitos de valores antigos.
+// Display TFT ST7735 128x160, paisagem (160x128) - reescrito do zero (nao
+// recuperado do firmware original, ver docs/README.md). Redesenho PARCIAL:
+// so limpa/redesenha a regiao de um campo quando o valor muda alem de um
+// threshold pequeno (padrao visto no .ino original recuperado depois - ver
+// docs/README.md), em vez de fillScreen() toda hora. Evita flicker e reduz
+// trafego no barramento SPI por ciclo.
 // ---------------------------------------------------------------------
 #define COR_FUNDO_PAINEL 0x2104   // cinza-azulado escuro (header/rodape)
 #define COR_APAGADO      0x39E7   // cinza escuro (indicador "desligado")
 #define COR_LABEL        0x7BEF   // cinza claro (rotulos pequenos)
 
-// Bolinha de status (ligado=verde, desligado=cinza) + rotulo ao lado.
-void desenharStatusDot(int x, int y, bool ligado, const char *label) {
-  tft.fillCircle(x, y, 4, ligado ? ST77XX_GREEN : COR_APAGADO);
-  tft.setTextColor(ligado ? ST77XX_WHITE : COR_LABEL);
-  tft.setTextSize(1);
-  tft.setCursor(x + 8, y - 4);
-  tft.print(label);
-}
-
 void atualizarDisplay() {
-  // Reinicializa o controlador periodicamente - autorrecuperacao caso o TFT
-  // trave/apague por ruido eletrico ou glitch de sinal SPI (sintoma observado
-  // na fiacao real: tela mostra dados e depois fica em branco).
-  static uint8_t ciclosDesdeReinit = 0;
-  if (ciclosDesdeReinit++ >= 5) {
+  // Reinicializacao periodica de autorrecuperacao - manter como rede de
+  // seguranca de baixa frequencia mesmo com a fiacao ja corrigida (era a
+  // cada 5 ciclos/~5s, o que causava o proprio pisca-pisca branco que
+  // parecia um defeito; ~5min ainda protege contra um glitch raro sem
+  // ficar visivel).
+  static uint16_t ciclosDesdeReinit = 0;
+  static bool forcarRedesenho = true; // true no boot e logo apos cada reinit
+  if (ciclosDesdeReinit++ >= 300) {
     ciclosDesdeReinit = 0;
     tft.initR(INITR_BLACKTAB);
     tft.setSPISpeed(4000000);
-    tft.setRotation(0);
+    tft.setRotation(1); // paisagem (160x128) - montagem fisica e deitada
+    forcarRedesenho = true; // reinit apaga a tela - forca redesenhar tudo
   }
 
+  bool wifiOk = WiFi.status() == WL_CONNECTED;
   float dT = t1 - t2;
   unsigned long up = (millis() - bootMillis) / 1000UL;
-  bool wifiOk = WiFi.status() == WL_CONNECTED;
+  int dutyPct = duty * 100 / 255;
+  int fanPct = fDuty * 100 / 255;
+  int extPct = eDuty * 100 / 255;
 
-  tft.fillScreen(ST77XX_BLACK);
+  static float lastT1 = NAN, lastH1 = NAN, lastT2 = NAN, lastH2 = NAN;
+  static int lastAlvo = -999;
+  static float lastDT = -999;
+  static int lastDuty = -1;
+  static bool lastWifiOk = false, lastModoManual = false;
 
-  // ----- Cabecalho (titulo muda de cor em modo manual) -----
-  tft.fillRect(0, 0, 128, 14, COR_FUNDO_PAINEL);
-  tft.setTextSize(1);
-  tft.setTextColor(modoManual ? ST77XX_YELLOW : ST77XX_WHITE);
-  tft.setCursor(4, 4);
-  tft.print(modoManual ? "MANUAL" : "SECADORA");
-  tft.fillCircle(120, 7, 3, wifiOk ? ST77XX_GREEN : ST77XX_RED);
-
-  // ----- TOPO (numero grande) -----
-  tft.setTextColor(COR_LABEL);
-  tft.setCursor(4, 18);
-  tft.print("TOPO");
-  tft.setTextSize(3);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 28);
-  tft.printf("%2.0f", t1);
-  tft.setTextSize(2);
-  tft.print("C");
-  tft.setTextSize(1);
-  tft.setTextColor(COR_LABEL);
-  tft.setCursor(90, 40);
-  tft.printf("%2.0f%%", h1);
-
-  // ----- COPA (numero grande) -----
-  tft.setTextColor(COR_LABEL);
-  tft.setCursor(4, 60);
-  tft.print("COPA");
-  tft.setTextSize(3);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 70);
-  tft.printf("%2.0f", t2);
-  tft.setTextSize(2);
-  tft.print("C");
-  tft.setTextSize(1);
-  tft.setTextColor(COR_LABEL);
-  tft.setCursor(90, 82);
-  tft.printf("%2.0f%%", h2);
-
-  tft.drawFastHLine(4, 104, 120, COR_FUNDO_PAINEL);
-
-  // ----- Alvo / delta -----
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(4, 110);
-  tft.printf("ALVO %dC", alvo);
-  tft.setTextSize(1);
-  tft.setTextColor(COR_LABEL);
-  tft.setCursor(4, 128);
-  tft.printf("dT %4.1fC", dT);
-
-  // ----- Barra de potencia do aquecedor -----
-  int larguraBarra = 120;
-  int fillBarra = (int)((long)duty * larguraBarra / 255);
-  tft.drawRect(4, 138, larguraBarra, 8, COR_LABEL);
-  tft.fillRect(5, 139, larguraBarra - 2, 6, COR_APAGADO);
-  if (fillBarra > 2) {
-    tft.fillRect(5, 139, fillBarra - 2, 6, heaterOn ? ST77XX_RED : ST77XX_GREEN);
+  if (forcarRedesenho) {
+    tft.fillScreen(ST77XX_BLACK);
+    tft.fillRect(0, 0, 160, 14, COR_FUNDO_PAINEL);
+    tft.drawFastHLine(4, 43, 152, COR_FUNDO_PAINEL);
+    tft.drawFastHLine(4, 91, 152, COR_FUNDO_PAINEL);
   }
 
-  // ----- Status (aquecedor / fan / exaustor / modo) -----
-  desenharStatusDot(6, 152, heaterOn, "AQ");
-  desenharStatusDot(46, 152, fanOn, "FAN");
-  desenharStatusDot(90, 152, exaustOn, "EXA");
+  // ----- Cabecalho (titulo muda de cor em modo manual, bolinha de WiFi) -----
+  if (forcarRedesenho || modoManual != lastModoManual) {
+    tft.fillRect(4, 2, 100, 10, COR_FUNDO_PAINEL);
+    tft.setTextSize(1);
+    tft.setTextColor(modoManual ? ST77XX_YELLOW : ST77XX_WHITE);
+    tft.setCursor(4, 4);
+    tft.print(modoManual ? "MANUAL" : "SECADORA");
+    lastModoManual = modoManual;
+  }
+  if (forcarRedesenho || wifiOk != lastWifiOk) {
+    tft.fillCircle(150, 7, 3, wifiOk ? ST77XX_GREEN : ST77XX_RED);
+    lastWifiOk = wifiOk;
+  }
+
+  // ----- TOPO (esquerda) / COPA (direita), lado a lado -----
+  if (forcarRedesenho || isnan(lastT1) || fabsf(t1 - lastT1) > 0.09f || fabsf(h1 - lastH1) > 0.4f) {
+    tft.fillRect(4, 16, 74, 25, ST77XX_BLACK);
+    tft.setTextColor(COR_LABEL);
+    tft.setTextSize(1);
+    tft.setCursor(4, 16);
+    tft.print("TOPO");
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(4, 26);
+    tft.printf("%2.0fC", t1);
+    tft.setTextSize(1);
+    tft.setTextColor(COR_LABEL);
+    tft.setCursor(50, 33);
+    tft.printf("%2.0f%%", h1);
+    lastT1 = t1; lastH1 = h1;
+  }
+  if (forcarRedesenho || isnan(lastT2) || fabsf(t2 - lastT2) > 0.09f || fabsf(h2 - lastH2) > 0.4f) {
+    tft.fillRect(84, 16, 72, 25, ST77XX_BLACK);
+    tft.setTextColor(COR_LABEL);
+    tft.setTextSize(1);
+    tft.setCursor(84, 16);
+    tft.print("COPA");
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(84, 26);
+    tft.printf("%2.0fC", t2);
+    tft.setTextSize(1);
+    tft.setTextColor(COR_LABEL);
+    tft.setCursor(130, 33);
+    tft.printf("%2.0f%%", h2);
+    lastT2 = t2; lastH2 = h2;
+  }
+
+  // ----- ALVO / dT -----
+  if (forcarRedesenho || alvo != lastAlvo || fabsf(dT - lastDT) > 0.09f) {
+    tft.fillRect(4, 46, 152, 9, ST77XX_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.setCursor(4, 46);
+    tft.printf("ALVO %dC", alvo);
+    tft.setTextColor(COR_LABEL);
+    tft.setCursor(70, 46);
+    if (dT >= 0) tft.print("+");
+    tft.printf("dT %.1fC", dT);
+    lastAlvo = alvo; lastDT = dT;
+  }
+
+  // ----- AQ / FAN / EXA - duty% (texto colorido = ligado/desligado) -----
+  tft.fillRect(4, 58, 152, 9, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(heaterOn ? ST77XX_RED : COR_APAGADO);
+  tft.setCursor(4, 58);
+  tft.printf("AQ %3d%%", dutyPct);
+  tft.setTextColor(fanOn ? ST77XX_GREEN : COR_APAGADO);
+  tft.setCursor(60, 58);
+  tft.printf("FAN %3d%%", fanPct);
+  tft.setTextColor(exaustOn ? ST77XX_CYAN : COR_APAGADO);
+  tft.setCursor(116, 58);
+  tft.printf("EXA %3d%%", extPct);
+
+  // ----- Barra de potencia do aquecedor -----
+  if (forcarRedesenho || duty != lastDuty) {
+    int larguraBarra = 152;
+    int fillBarra = (int)((long)duty * larguraBarra / 255);
+    tft.fillRect(4, 70, larguraBarra, 10, COR_APAGADO);
+    if (fillBarra > 2) {
+      tft.fillRect(4, 70, fillBarra, 10, heaterOn ? ST77XX_RED : ST77XX_GREEN);
+    }
+    lastDuty = duty;
+  }
+
+  // ----- Rodape: modo + uptime (redesenha todo ciclo, custo baixo) -----
+  tft.fillRect(4, 94, 152, 9, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(modoManual ? ST77XX_YELLOW : ST77XX_GREEN);
+  tft.setCursor(4, 94);
+  tft.print(modoManual ? "MANUAL" : "AUTO");
+  tft.setTextColor(COR_LABEL);
+  tft.setCursor(60, 94);
+  tft.printf("up %02lu:%02lu:%02lu", up / 3600UL, (up % 3600UL) / 60UL, up % 60UL);
+
+  forcarRedesenho = false;
 }
 
 // ---------------------------------------------------------------------
@@ -388,8 +472,8 @@ void setup() {
   tft.initR(INITR_BLACKTAB);
   tft.setSPISpeed(4000000);   // clock SPI baixo (default e bem mais alto) -
                                // reduz erro de sinal em fiacao breadboard/jumper
-  tft.setRotation(0);   // retrato (tela montada em pe) - trocar p/ 2 se a imagem
-                        // ficar de cabeca para baixo
+  tft.setRotation(1);   // paisagem (160x128) - montagem fisica e deitada -
+                        // trocar p/ 3 se a imagem ficar de cabeca para baixo
   tft.fillScreen(ST77XX_BLACK);
   Serial.println("[TFT] Inicializado");
 
@@ -406,6 +490,13 @@ void setup() {
     Serial.printf("\nWiFi OK - IP: %s\n", WiFi.localIP().toString().c_str());
     configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
     Serial.println("NTP OK");
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.printf("mDNS OK - acessivel em http://%s.local\n", MDNS_HOSTNAME);
+    } else {
+      Serial.println("mDNS FALHOU ao iniciar");
+    }
+    wifiConectado = true;
   } else {
     Serial.println("\nWiFi FALHOU - continuando offline (dashboard local indisponivel ate reconectar)");
   }
@@ -449,5 +540,17 @@ void loop() {
   if (agora - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
     lastDisplayUpdate = agora;
     atualizarDisplay();
+  }
+
+  // Reconexao automatica - so tentamos conectar uma vez no setup(), sem isso
+  // uma queda de WiFi depois do boot deixava o dashboard offline pra sempre.
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiConectado) {
+      wifiConectado = false;
+      Serial.println("[WiFi] Conexao perdida, tentando reconectar...");
+      WiFi.reconnect();
+    }
+  } else {
+    wifiConectado = true;
   }
 }

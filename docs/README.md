@@ -162,13 +162,14 @@ usuário a partir da documentação/fiação real do hardware:
 
 | Pino | Função |
 |---|---|
-| GPIO27 | MOSFET → 2x cooler DeepCool **TOPO** (mapeado para o badge "FAN" do dashboard) |
-| GPIO33 | MOSFET → 2x cooler DeepCool **COPA** (mapeado para o badge "EXT" do dashboard) |
+| GPIO27 (`PIN_EXT`) | MOSFET → 2x cooler DeepCool **TOPO** — exaustão, badge "EXT" |
+| GPIO33 (`PIN_FAN`) | MOSFET → 2x cooler DeepCool **COPA** — circulação, badge "FAN" |
 | GPIO32 | SSR 40A → 2x aquecedor 400W / 110V (controle por time-proportioning) |
 
-⚠️ O mapeamento FAN=topo / EXT=copa foi uma escolha razoável (a fiação real
-é por localização — topo/copa — enquanto o dashboard rotula por função —
-fan/exaustor). Confirme na prática e inverta em `config.h` se necessário.
+✅ Confirmado com o usuário: TOPO faz **exaustão** (joga ar pra fora) e COPA
+faz **circulação** (mistura o ar interno) — o oposto do que se assumia
+inicialmente. Corrigido em `config.h`/`main.cpp` (constantes renomeadas por
+função, `PIN_FAN`/`PIN_EXT`, em vez de por posição física).
 
 Uma tentativa inicial de identificar os pinos por teste físico (gravando um
 sketch que pulsava candidatos um a um) foi abandonada por ser lenta demais de
@@ -201,38 +202,88 @@ Pinagem confirmada pelo usuário:
 | VCC / LED (backlight) | 3.3V direto |
 
 Implementado em `src/main.cpp` (`atualizarDisplay()`) com a lib `Adafruit
-ST7735 and ST7789 Library`. Layout em retrato (tela montada em pé,
-`setRotation(0)`): números grandes de TOPO/COPA em destaque, alvo, barra de
-potência do aquecedor, e indicadores de status (aquecedor/fan/exaustor) com
-bolinha colorida. Atualiza a cada `DISPLAY_UPDATE_MS` (1s), redesenhando a
-tela inteira.
+ST7735 and ST7789 Library`. Layout em **paisagem** (tela montada deitada,
+`setRotation(1)` — confirmado pelo usuário depois de recuperar o `.ino`
+original, que também usava paisagem; a suposição inicial de retrato estava
+errada): TOPO/COPA lado a lado, ALVO/dT, potência do aquecedor/fan/exaustor
+em % (texto colorido conforme ligado/desligado), barra de potência do
+aquecedor, e rodapé com modo (AUTO/MANUAL) + uptime. Atualiza a cada
+`DISPLAY_UPDATE_MS` (1s) com **redesenho parcial**: só limpa/redesenha a
+região de um campo quando o valor muda além de um threshold pequeno, em vez
+de `fillScreen()` toda hora (técnica vista no `.ino` original recuperado,
+ver seção abaixo).
 
-⚠️ **Problema conhecido**: o display mostra os dados e depois apaga/pisca —
-sintoma que muda conforme o aparelho é movido fisicamente, apontando para
-solda fria/mau contato (provavelmente no GND ou no RESET), não bug de
-software. Mitigação em código: reinicialização automática do controlador a
-cada poucos ciclos (`ciclosDesdeReinit` em `atualizarDisplay()`) para
-recuperar sozinho quando trava. Correção definitiva pendente: inspecionar/
-resoldar as juntas do display, começando por GND e RESET.
+**Problema do pisca-pisca branco — resolvido**: o sintoma ("mostra os dados
+e depois apaga") persistia mesmo depois do usuário trocar todos os cabos do
+display, descartando solda fria/mau contato como causa. A causa real era do
+nosso próprio código: uma reinicialização periódica do controlador
+(`ciclosDesdeReinit` em `atualizarDisplay()`) rodando a cada ~5s como
+"autorrecuperação" — esse reinit por si só pisca a tela em branco por um
+instante (reset de hardware do controlador). Reduzido para ~5min (ainda serve
+de rede de segurança de baixa frequência, mas não é mais perceptível).
 
 ### O que foi RECONSTRUÍDO (não é o algoritmo original)
 
 A lógica exata de controle (histerese, curva de duty, tempos de exaustão)
 **não é recuperável** de um binário compilado — não sobra nenhum texto
-indicando os valores. Foi implementado um controle proporcional simples como
-ponto de partida, em `src/main.cpp` (função `controlar()`) e
-`src/config.h`:
+indicando os valores. Foi implementado um controle **PI** (proporcional +
+integral) em `src/main.cpp` (função `controlar()`) e `src/config.h`:
 
-- Erro = alvo − temperatura média; duty do aquecedor proporcional ao erro
-  (mapeado de 0 a 10 °C de erro → 0 a 255 de duty), com histerese de
+- Erro = alvo − temperatura média **suavizada** (`filtTemp`, média móvel
+  exponencial, `SENSOR_SMOOTH_FACTOR`) — reduz chacoalho de duty por ruído
+  de leitura.
+- Proporcional: erro de 0 a 10°C mapeado para duty 0-255, com histerese de
   `HEATER_DEADBAND_C`.
+- Integral: acumula o erro ao longo do tempo (anti-windup em
+  `HEATER_INTEGRAL_MAX`) pra fechar o erro residual permanente visto na
+  prática com só-proporcional (~3.5°C abaixo do alvo, ele "empatava" onde o
+  calor gerado equilibrava o calor perdido, sem fechar o gap).
 - Aquecedor (SSR) controlado por **time-proportioning**: dentro de uma
-  janela de `HEATER_WINDOW_MS`, fica ligado por `duty/255` da janela.
-- Ventoinhas ligam junto com o aquecedor, em duty fixo
-  (`FAN_TOPO_DUTY_AUTO`, `FAN_COPA_DUTY_AUTO`).
+  janela de `HEATER_WINDOW_MS`, fica ligado por `duty/255` da janela. Mantido
+  assim mesmo depois de achar o `.ino` original (que usava PWM direto de
+  1kHz) porque o SSR é um **SSR-40DA**, tipicamente zero-cross — PWM rápido
+  não é seguro nesse tipo de SSR.
+- Ventoinhas ligam junto com o aquecedor, em duty fixo (`FAN_DUTY_AUTO` pro
+  cooler de circulação/COPA, `EXT_DUTY_AUTO` pro de exaustão/TOPO).
 
-**Ajustar esses parâmetros em `config.h` depois de observar o comportamento
-real** — não há garantia de que batem com o comportamento original.
+**Ainda não validado até o fim** — o aquecedor físico parou de responder
+durante o teste (ver pendência urgente mais abaixo), então não dá pra
+confirmar se o PI fecha o gap sem overshoot na prática real ainda.
+
+### `.ino` original recuperado depois (`_SecadoraPWM3D.INO.ino`)
+
+O usuário resgatou um `.ino` (v3.1, não finalizado, de outra rede/local —
+`APT_07`) que mostra uma versão mais madura do firmware do que o que foi
+reconstruído por engenharia reversa do dump de flash. Não é a mesma versão
+que rodava na placa quando o dump foi feito (esse `.ino` só tem **1**
+MOSFET de ventoinha — comentário do autor: `// PIN_EXAUST removido - apenas
+1 MOSFET disponivel` — enquanto o binário dumpado já tinha 2 campos de
+ventoinha no JSON), então é uma iteração anterior/paralela, não o "firmware
+final" — mas revelou boas ideias que foram adotadas nesta sessão:
+
+- **PID completo** (o autor também percebeu o erro residual do
+  só-proporcional e adicionou integral — mesma conclusão que chegamos
+  independente; seu `KP=25` é quase idêntico ao nosso ganho proporcional
+  efetivo de `25.5`). Adotamos o P+I mas não o termo D (derivativo) ainda —
+  ver seção de controle acima.
+- **Suavização exponencial dos sensores** (`smooth()`, fator 0.15) —
+  adotada (`filtTemp`/`filtHum`/`filtUA` em `main.cpp`).
+- **Reconexão automática de WiFi** (`WiFi.reconnect()` quando cai) — adotada.
+- **Retry com `WiFiClientSecure`** no log do Google Sheets, pra contornar um
+  bug conhecido do ESP32 core v3 com HTTPS (comentário do autor: "HTTP -1 é
+  comum") — adotado, e ajudou a expor (e corrigir) um bug nosso separado:
+  o timestamp tem espaço e não estava sendo escapado na URL, causando
+  HTTP 400 silencioso.
+- **Layout do display em paisagem + redesenho parcial** — adotado (ver seção
+  TFT acima).
+- **IP fixo** — o `.ino` original usava, mas para a rede antiga (`APT_07`).
+  Optamos por manter IP dinâmico (DHCP) e resolver por nome via **mDNS**
+  (`http://secadora.local`) em vez de fixar o IP.
+- **Fan por delta topo-copa** (uma só ventoinha, sempre ligada, velocidade
+  proporcional à diferença de temperatura entre os sensores, em vez de
+  liga/desliga junto com o aquecedor) — **não adotado** nesta rodada, fica
+  como ideia pra reconsiderar já que agora temos 2 MOSFETs de verdade
+  (diferente da época desse `.ino`).
 
 ### Estrutura
 
@@ -274,6 +325,11 @@ versionado**. Para recriar esse arquivo:
 Testado apos gravar: WiFi conecta, `/data` `/set` `/manual` e o dashboard
 respondem corretamente, sensores SHT31 lendo nos dois pontos.
 
+Acesso via `http://secadora.local` (mDNS, IP continua dinâmico). Display em
+paisagem, sem flicker, layout denso (TOPO/COPA/ALVO/dT/potências/modo/uptime).
+Log do Google Sheets confirmado funcionando (HTTP 302). Aquecedor em **modo
+manual** até a falha física ser resolvida — ver pendência urgente abaixo.
+
 ## Próximos passos
 
 1. ~~Revisar `secadora_esp32/src/main.cpp` e `config.h`~~ — feito.
@@ -281,18 +337,26 @@ respondem corretamente, sensores SHT31 lendo nos dois pontos.
 3. ~~Confirmar mapeamento FAN/EXT~~ — feito. Usuário confirmou fisicamente que
    TOPO exausta e COPA circula (invertido do que se assumia) — corrigido em
    `config.h`/`main.cpp` (`PIN_FAN`/`PIN_EXT`, ver seção TFT/pinagem acima).
-4. ~~Ajustar controle do aquecedor~~ — parcialmente feito. So-proporcional
-   estabilizava com erro residual permanente (~3.5C abaixo do alvo, visto em
-   ~6min de teste real). Adicionado termo integral (PI) em `controlar()`.
-   **Ainda não validado até o fim** — ver pendência urgente abaixo.
+4. ~~Ajustar controle do aquecedor~~ — parcialmente feito. Adicionado termo
+   integral (PI), suavização de sensores, e anti-windup mais conservador
+   (ver seção de controle acima). **Ainda não validado até o fim** — ver
+   pendência urgente abaixo.
+5. ~~mDNS + reconexão de WiFi~~ — feito. `http://secadora.local` funciona,
+   IP continua dinâmico (DHCP). Reconecta sozinho se a conexão cair.
+6. ~~Retry no log do Google Sheets~~ — feito, e corrigido um bug real junto
+   (timestamp sem escapar na URL causava HTTP 400 silencioso).
+7. ~~Display: paisagem + redesenho parcial + layout mais denso~~ — feito.
+   Pisca-pisca branco resolvido (causa era nossa própria reinicialização
+   periódica, não solda — usuário já trocou todos os cabos e confirmou).
 
 ## 🔴 Pendência urgente (próxima sessão): aquecedor parece não estar aquecendo
 
-Durante o teste do PI (~9min com o sistema fechado, ninguém mexendo), o duty
-ficou travado em 255 (100%) o tempo todo e a temperatura **caiu** de ~44°C
-para ~22°C (ambiente) em vez de subir ou estabilizar. Ou seja, o software
-mandou aquecer no máximo e na prática não houve aquecimento nenhum. Sistema
-deixado em **modo manual (tudo desligado)** por segurança ao final da sessão.
+Ainda não resolvida — não foi mexida nesta sessão (o foco foi WiFi/display/
+controle). Durante o teste do PI, o duty ficou travado em 255 (100%) o tempo
+todo e a temperatura **caiu** de ~44°C para ~22°C (ambiente) em vez de subir
+ou estabilizar. Ou seja, o software mandou aquecer no máximo e na prática não
+houve aquecimento nenhum. Sistema fica em **modo manual (tudo desligado)**
+por segurança a cada boot desta sessão em diante, até isso ser resolvido.
 
 Checar fisicamente antes de religar (circuito de 110V/40A — cuidado):
 
@@ -308,10 +372,12 @@ Depois de resolver:
 
 1. Validar se o PI fecha o gap até o alvo sem overshoot significativo, e
    reajustar `HEATER_KI`/`HEATER_INTEGRAL_MAX` se necessário.
-2. Resolver a solda fria do display (GND/RESET) — combinado para depois,
-   ainda pendente.
-3. Configurar IP fixo (ou mDNS tipo `secadora.local`) para o dashboard —
-   combinado para depois de terminar os ajustes de controle.
+2. Considerar adotar o termo derivativo (KD) do `.ino` original, se o P+I
+   sozinho não amortecer bem o overshoot na prática.
+3. Considerar a estratégia de fan por delta topo-copa do `.ino` original
+   (ventoinha sempre ligada, velocidade proporcional à diferença de
+   temperatura) em vez do liga/desliga atual — não adotada ainda, ver seção
+   do `.ino` original acima.
 4. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
    completo (`esp32_backup/flash_backup_4MB.bin`) permite restaurar a
    qualquer momento com `esptool write-flash 0x0 flash_backup_4MB.bin`
