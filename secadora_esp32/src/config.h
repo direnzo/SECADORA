@@ -41,9 +41,12 @@
 #define DST_OFFSET_SEC 0
 
 // ===== Faixa de temperatura alvo (confirmado no JS do dashboard original) =====
+// Default 60C: meio-termo seguro entre materiais (cobre bem PETG, seguro pra
+// PLA/TPU mesmo passando um pouco do ideal). Teto 75C fica disponivel pra
+// quem quiser secar nylon manualmente (precisa de mais calor, 70-90C).
 #define ALVO_MIN 30
 #define ALVO_MAX 75
-#define ALVO_DEFAULT 48
+#define ALVO_DEFAULT 60
 
 // ===== Controle (NAO recuperado do firmware original - valores de partida,
 // ajustar apos testar na pratica) =====
@@ -67,3 +70,13 @@
 // controle - reduz o chacoalho de duty visto na pratica com leitura crua.
 // Fator baixo = suavizacao mais forte (mais lento pra reagir).
 #define SENSOR_SMOOTH_FACTOR   0.15f
+
+// ===== Trava de seguranca por sensor obsoleto =====
+// Visto na pratica: o SHT31 pode travar (I2C sem resposta) e o codigo antigo
+// so mantinha o ultimo valor bom pra sempre, sem avisar ninguem - o PI podia
+// ficar mandando aquecer no maximo achando que a temperatura nao mudou.
+// Se um dos dois sensores de temperatura ficar mais que SENSOR_TIMEOUT_MS sem
+// leitura valida, o aquecedor e forcado a desligar (ver sensorFalha/
+// controlar() em main.cpp), independente do que o PI calcular.
+#define SENSOR_TIMEOUT_MS          20000UL  // ~10x o intervalo de leitura
+#define SENSOR_RECOVERY_INTERVAL_MS 10000UL // intervalo entre tentativas de reinit do I2C

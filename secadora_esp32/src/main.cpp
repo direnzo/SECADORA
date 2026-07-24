@@ -66,6 +66,14 @@ bool wifiConectado = false;  // rastreia queda de WiFi pra reconectar sozinho
 // individuais (t1/h1/t2/h2) continuam crus, exibidos como estao.
 float filtTemp = NAN, filtHum = NAN, filtUA = 0;
 
+// Trava de seguranca: se um sensor de temperatura ficar sem leitura valida
+// por SENSOR_TIMEOUT_MS, sensorFalha vira true e controlar() forca o
+// aquecedor desligado (ver config.h). Sem isso, um sensor travado faz o
+// controle continuar usando o ultimo valor bom pra sempre, silenciosamente.
+unsigned long lastValidT1Millis = 0, lastValidT2Millis = 0;
+unsigned long lastSensorRecoveryTry = 0;
+bool sensorFalha = false;
+
 // ---------------------------------------------------------------------
 // Umidade absoluta (g/m3) - formula padrao (Magnus)
 // ---------------------------------------------------------------------
@@ -90,10 +98,32 @@ void lerSensores() {
   float novoT2 = sht31Copa.readTemperature();
   float novoH2 = sht31Copa.readHumidity();
 
-  if (!isnan(novoT1)) t1 = novoT1;
+  unsigned long agora = millis();
+  if (!isnan(novoT1)) { t1 = novoT1; lastValidT1Millis = agora; }
   if (!isnan(novoH1)) h1 = novoH1;
-  if (!isnan(novoT2)) t2 = novoT2;
+  if (!isnan(novoT2)) { t2 = novoT2; lastValidT2Millis = agora; }
   if (!isnan(novoH2)) h2 = novoH2;
+
+  bool falhaAntes = sensorFalha;
+  sensorFalha = (agora - lastValidT1Millis > SENSOR_TIMEOUT_MS) ||
+                (agora - lastValidT2Millis > SENSOR_TIMEOUT_MS);
+
+  if (sensorFalha) {
+    if (!falhaAntes) {
+      Serial.println("[SHT31] FALHA - sem leitura valida ha muito tempo. Aquecedor bloqueado por seguranca.");
+    }
+    // Autorrecuperacao: tenta reinicializar o barramento I2C periodicamente,
+    // sem precisar de reboot manual.
+    if (agora - lastSensorRecoveryTry >= SENSOR_RECOVERY_INTERVAL_MS) {
+      lastSensorRecoveryTry = agora;
+      Serial.println("[SHT31] Tentando reinicializar I2C...");
+      Wire.begin(PIN_SDA, PIN_SCL);
+      sht31Topo.begin(SHT31_ADDR_TOPO);
+      sht31Copa.begin(SHT31_ADDR_COPA);
+    }
+  } else if (falhaAntes) {
+    Serial.println("[SHT31] Sensores voltaram a responder normalmente.");
+  }
 
   float ua1 = calcAbsHumidity(t1, h1);
   float ua2 = calcAbsHumidity(t2, h2);
@@ -118,6 +148,19 @@ void controlar() {
   if (modoManual) return; // em modo manual, duty/estado sao definidos via /manual e nao mexidos aqui
 
   static float integralErro = 0;
+
+  // Trava de seguranca: sensor de temperatura sem leitura valida ha muito
+  // tempo (ver lerSensores()/config.h) - desliga tudo, nao confia no PI
+  // enquanto nao soubermos a temperatura real.
+  if (sensorFalha) {
+    duty = 0; fDuty = 0; eDuty = 0;
+    heaterOn = fanOn = exaustOn = false;
+    integralErro = 0;
+    ledcWrite(LEDC_CH_FAN, 0);
+    ledcWrite(LEDC_CH_EXT, 0);
+    return;
+  }
+
   float tMed = filtTemp; // media suavizada, nao a crua - reduz ruido no duty
   float erro = alvo - tMed;
 
@@ -169,7 +212,7 @@ String montarJson() {
   snprintf(buf, sizeof(buf),
     "{\"wf\":%s,\"ip\":\"%s\",\"t1\":%.2f,\"h1\":%.2f,\"t2\":%.2f,\"h2\":%.2f,"
     "\"ua\":%.2f,\"alvo\":%d,\"duty\":%d,\"f_duty\":%d,\"e_duty\":%d,"
-    "\"h_on\":%s,\"f_on\":%s,\"e_on\":%s,\"m_man\":%s,\"up\":%lu}",
+    "\"h_on\":%s,\"f_on\":%s,\"e_on\":%s,\"m_man\":%s,\"sensor_falha\":%s,\"up\":%lu}",
     WiFi.status() == WL_CONNECTED ? "true" : "false",
     WiFi.localIP().toString().c_str(),
     t1, h1, t2, h2,
@@ -178,6 +221,7 @@ String montarJson() {
     fanOn ? "true" : "false",
     exaustOn ? "true" : "false",
     modoManual ? "true" : "false",
+    sensorFalha ? "true" : "false",
     up
   );
   return String(buf);
@@ -333,7 +377,7 @@ void atualizarDisplay() {
   static int lastAlvo = -999;
   static float lastDT = -999;
   static int lastDuty = -1;
-  static bool lastWifiOk = false, lastModoManual = false;
+  static bool lastWifiOk = false, lastModoManual = false, lastSensorFalha = false;
 
   if (forcarRedesenho) {
     tft.fillScreen(ST77XX_BLACK);
@@ -342,14 +386,15 @@ void atualizarDisplay() {
     tft.drawFastHLine(4, 91, 152, COR_FUNDO_PAINEL);
   }
 
-  // ----- Cabecalho (titulo muda de cor em modo manual, bolinha de WiFi) -----
-  if (forcarRedesenho || modoManual != lastModoManual) {
-    tft.fillRect(4, 2, 100, 10, COR_FUNDO_PAINEL);
+  // ----- Cabecalho (titulo muda de cor em modo manual, alerta se sensor falhar) -----
+  if (forcarRedesenho || modoManual != lastModoManual || sensorFalha != lastSensorFalha) {
+    tft.fillRect(4, 2, 100, 10, sensorFalha ? ST77XX_RED : COR_FUNDO_PAINEL);
     tft.setTextSize(1);
-    tft.setTextColor(modoManual ? ST77XX_YELLOW : ST77XX_WHITE);
+    tft.setTextColor(sensorFalha ? ST77XX_WHITE : (modoManual ? ST77XX_YELLOW : ST77XX_WHITE));
     tft.setCursor(4, 4);
-    tft.print(modoManual ? "MANUAL" : "SECADORA");
+    tft.print(sensorFalha ? "FALHA SENSOR" : (modoManual ? "MANUAL" : "SECADORA"));
     lastModoManual = modoManual;
+    lastSensorFalha = sensorFalha;
   }
   if (forcarRedesenho || wifiOk != lastWifiOk) {
     tft.fillCircle(150, 7, 3, wifiOk ? ST77XX_GREEN : ST77XX_RED);
