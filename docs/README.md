@@ -327,8 +327,23 @@ respondem corretamente, sensores SHT31 lendo nos dois pontos.
 
 Acesso via `http://secadora.local` (mDNS, IP continua dinâmico). Display em
 paisagem, sem flicker, layout denso (TOPO/COPA/ALVO/dT/potências/modo/uptime).
-Log do Google Sheets confirmado funcionando (HTTP 302). Aquecedor em **modo
-manual** até a falha física ser resolvida — ver pendência urgente abaixo.
+Log do Google Sheets confirmado funcionando (HTTP 302).
+
+**Aquecedor físico corrigido** — era um fio solto no lado de 110V (não no
+GPIO/controle). Diagnosticado sem multímetro: reatribuindo temporariamente
+`PIN_HEATER_SSR` para um GPIO livre (25) e comparando o LED do SSR entre os
+dois pinos. Validado com teste real: 39°C → 54°C em ~7min, umidade caindo de
+forma consistente (39%→31% e 45%→22%), duty do PI já reduzindo ao se
+aproximar do alvo — controle funcionando como esperado.
+
+**Trava de segurança nova**: durante o teste do aquecedor, os SHT31
+travaram silenciosamente por vários minutos (mesma leitura byte-a-byte)
+enquanto o software continuava mandando 100% de duty, sem saber que os
+dados estavam obsoletos. Corrigido: se um sensor de temperatura ficar
+`SENSOR_TIMEOUT_MS` sem leitura válida, `sensorFalha` força o aquecedor a
+desligar incondicionalmente (independente do PI) e o display mostra
+"FALHA SENSOR" em vermelho. Autorrecuperação tenta reinicializar o
+barramento I2C periodicamente. Campo `sensor_falha` exposto em `/data`.
 
 ## Próximos passos
 
@@ -337,10 +352,9 @@ manual** até a falha física ser resolvida — ver pendência urgente abaixo.
 3. ~~Confirmar mapeamento FAN/EXT~~ — feito. Usuário confirmou fisicamente que
    TOPO exausta e COPA circula (invertido do que se assumia) — corrigido em
    `config.h`/`main.cpp` (`PIN_FAN`/`PIN_EXT`, ver seção TFT/pinagem acima).
-4. ~~Ajustar controle do aquecedor~~ — parcialmente feito. Adicionado termo
-   integral (PI), suavização de sensores, e anti-windup mais conservador
-   (ver seção de controle acima). **Ainda não validado até o fim** — ver
-   pendência urgente abaixo.
+4. ~~Ajustar controle do aquecedor~~ — feito e **validado com o aquecedor real
+   funcionando**: 39°C → 54°C em ~7min, umidade caindo, duty do PI reduzindo
+   ao se aproximar do alvo. Ver Status acima.
 5. ~~mDNS + reconexão de WiFi~~ — feito. `http://secadora.local` funciona,
    IP continua dinâmico (DHCP). Reconecta sozinho se a conexão cair.
 6. ~~Retry no log do Google Sheets~~ — feito, e corrigido um bug real junto
@@ -348,38 +362,34 @@ manual** até a falha física ser resolvida — ver pendência urgente abaixo.
 7. ~~Display: paisagem + redesenho parcial + layout mais denso~~ — feito.
    Pisca-pisca branco resolvido (causa era nossa própria reinicialização
    periódica, não solda — usuário já trocou todos os cabos e confirmou).
+8. ~~Aquecedor sem aquecer~~ — **resolvido**. Era um fio solto no lado de
+   110V. Diagnosticado sem multímetro reatribuindo `PIN_HEATER_SSR` pra um
+   GPIO livre e comparando o LED do SSR. Ver Status acima.
+9. ~~Trava de segurança por sensor obsoleto~~ — feito, ver Status acima
+   (`sensorFalha`, campo `sensor_falha` em `/data`, alerta no display).
 
-## 🔴 Pendência urgente (próxima sessão): aquecedor parece não estar aquecendo
+## Roadmap (visão de longo prazo — "secadora moderna")
 
-Ainda não resolvida — não foi mexida nesta sessão (o foco foi WiFi/display/
-controle). Durante o teste do PI, o duty ficou travado em 255 (100%) o tempo
-todo e a temperatura **caiu** de ~44°C para ~22°C (ambiente) em vez de subir
-ou estabilizar. Ou seja, o software mandou aquecer no máximo e na prática não
-houve aquecimento nenhum. Sistema fica em **modo manual (tudo desligado)**
-por segurança a cada boot desta sessão em diante, até isso ser resolvido.
+Ideias discutidas pra próximas sessões, ainda não implementadas:
 
-Checar fisicamente antes de religar (circuito de 110V/40A — cuidado):
+- **Presets por material**: botões/dropdown no dashboard pra PLA (40-50°C),
+  PETG (60-65°C), TPU (45-50°C), ABS/ASA (65-70°C), Nylon (70-90°C) — já
+  aplicando o alvo (e talvez o tempo) certo automaticamente em vez do
+  usuário digitar a temperatura manualmente.
+- **Timer/agendamento**: definir quando o ciclo de secagem começa e por
+  quanto tempo roda, em vez de só ligar/desligar manualmente.
+- **Rastreio de "filamento ainda seco"** depois do ciclo: em vez de um timer
+  fixo (que não reflete a umidade real do ambiente), usar os próprios
+  sensores de umidade (UA) pra estimar/alertar quando o filamento provavelmente
+  reabsorveu umidade — mais inteligente que um cronômetro simples.
+- Considerar adotar o termo derivativo (KD) do `.ino` original se o P+I
+  sozinho não amortecer bem algum overshoot que aparecer com o uso real.
+- Considerar a estratégia de fan por delta topo-copa do `.ino` original
+  (ventoinha sempre ligada, velocidade proporcional à diferença de
+  temperatura) em vez do liga/desliga atual — ver seção do `.ino` original
+  acima.
 
-1. Disjuntor/fusível do circuito do aquecedor (pode ter desarmado)
-2. LED indicador do SSR (deveria acender com o comando em 100%)
-3. Conexão/continuidade do elemento resistivo de 400W
-4. Alimentação de 110V chegando no SSR
-
-Isso não é bug de firmware — o software está calculando e mandando o duty
-certo (`aplicarHeaterSSR()` não foi alterado nessa sessão). É elétrico/físico.
-
-Depois de resolver:
-
-1. Validar se o PI fecha o gap até o alvo sem overshoot significativo, e
-   reajustar `HEATER_KI`/`HEATER_INTEGRAL_MAX` se necessário.
-2. Considerar adotar o termo derivativo (KD) do `.ino` original, se o P+I
-   sozinho não amortecer bem o overshoot na prática.
-3. Considerar a estratégia de fan por delta topo-copa do `.ino` original
-   (ventoinha sempre ligada, velocidade proporcional à diferença de
-   temperatura) em vez do liga/desliga atual — não adotada ainda, ver seção
-   do `.ino` original acima.
-4. Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
-   completo (`esp32_backup/flash_backup_4MB.bin`) permite restaurar a
-   qualquer momento com `esptool write-flash 0x0 flash_backup_4MB.bin`
-   (a rede WiFi antiga salva nele não vai mais conectar, mas o resto volta
-   como estava).
+Se quiser manter a possibilidade de voltar ao firmware antigo: o backup
+completo (`esp32_backup/flash_backup_4MB.bin`) permite restaurar a qualquer
+momento com `esptool write-flash 0x0 flash_backup_4MB.bin` (a rede WiFi
+antiga salva nele não vai mais conectar, mas o resto volta como estava).
